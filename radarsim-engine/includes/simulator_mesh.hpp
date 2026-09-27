@@ -189,10 +189,22 @@ private:
         const double T_pass = frame_start + tx->pulse_start_time_[p0] + delay +
                               u0;
 
-        // move targets to the pass instant and build the scene
+        // move targets to the pass instant and build the scene; for
+        // time-varying targets the marshalling layer expanded kinematics onto
+        // the flat timestamp grid (frames*channels, pulses, samples), so the
+        // grid index of this pass instant is the nearest-entry index
+        // (cp_radarsimc_mesh cp_GetTargetMesh: argmin |ts - t|)
+        const int n_ch = n_tx * n_rx;
+        const size_t ts_idx =
+            ((static_cast<size_t>(f_idx) * n_ch +
+              static_cast<size_t>(m) * n_rx) *
+                 pulses +
+             p0) *
+                samples +
+            s0;
         std::vector<rsim::SceneTri<L>> scene;
         std::vector<TargetMotion> target_motion;
-        BuildScene(targets_manager, T_pass, scene, target_motion);
+        BuildScene(targets_manager, T_pass, ts_idx, scene, target_motion);
         if (scene.empty()) {
             return;
         }
@@ -432,7 +444,7 @@ private:
 
     void BuildScene(
         const std::shared_ptr<TargetsManager<L>> &targets_manager,
-        double T_pass, std::vector<rsim::SceneTri<L>> &scene,
+        double T_pass, size_t ts_idx, std::vector<rsim::SceneTri<L>> &scene,
         std::vector<TargetMotion> &target_motion) {
         const auto &targets = targets_manager->targets();
         int ti = 0;
@@ -441,7 +453,7 @@ private:
             // the timestamp grid; use the nearest entry
             int idx = 0;
             if (tgt->array_size_ > 1) {
-                idx = static_cast<int>(T_pass);
+                idx = static_cast<int>(ts_idx);
                 if (idx >= tgt->array_size_) {
                     idx = tgt->array_size_ - 1;
                 }
@@ -468,11 +480,13 @@ private:
                 scene.push_back(st);
             }
             TargetMotion tm;
-            tm.vel = tgt->speed_array_[0];
-            tm.rotrate = tgt->rotrate_array_[0];
+            const size_t ki = tgt->array_size_ > 1
+                                  ? static_cast<size_t>(idx)
+                                  : 0;
+            tm.vel = tgt->speed_array_[ki];
+            tm.rotrate = tgt->rotrate_array_[ki];
             // world centre of rotation: the target origin under the pose
-            const rsv::Vec3<L> &lc = tgt->location_array_[
-                tgt->array_size_ > 1 ? idx : 0];
+            const rsv::Vec3<L> &lc = tgt->location_array_[ki];
             tm.center = rsv::Vec3<double>(
                 static_cast<double>(tgt->origin_[0] + lc[0]),
                 static_cast<double>(tgt->origin_[1] + lc[1]),
