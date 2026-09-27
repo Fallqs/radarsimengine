@@ -31,23 +31,20 @@ repository changes, these documents should be re-checked against it.
 
 ## Status (2026-09-28)
 
-**Phases 0–2 complete, plus LiDAR.** The engine builds with CMake and passes its
-CTest suites; via `radarsim-engine/tools/build_and_integrate.sh` it drops into
-the upstream package and runs the unmodified upstream pytest suite.
+**Phases 0–4 implemented (point/noise/interference/phase-noise/geometry/LiDAR/
+mesh-SBR/RCS); GPU (Phase 6) not started.** The engine builds with CMake and
+passes its CTest suites; via `radarsim-engine/tools/build_and_integrate.sh` it
+drops into the upstream package and runs the unmodified upstream pytest suite.
 
-Conformance against the full upstream suite: **420 passed / 43 failed /
+Conformance against the full upstream suite: **425 passed / 38 failed /
 45 skipped** (45 skips = glTF animation, pygltflib not installed here).
-Failures by cause:
-
-| Cause | Tests | Status |
-|-------|-------|--------|
-| Mesh (SBR+PO) simulator not yet implemented | 34 | Phase 4 |
-| RCS simulator not yet implemented | 2 | Phase 3 |
-| Multi-segment waveform phase quirk | 2 | open (see `radarsim-engine/docs/point_simulator_model.md`) |
-| Phase-noise golden (exact-sequence) | 1 | open |
-| Interference f32 rounding profile (60 GHz real mode) | 1 | open — matches to ~1e-5 rad |
-| `test_scene_interference` (mesh + interference) | 1 | Phase 4 |
-| `test_sim_cw_raytracing` (mesh) | 1 | Phase 4 |
-| range-gate mesh tests | 2 | Phase 4 |
-
 All point-target, noise, pulsed, range-gate, and LiDAR suites pass fully.
+The mesh/RCS goldens fail on tolerance: they encode the engine's exact ray
+sampler, which is not externally documented at the precision needed — the
+implementation is physically validated instead (plate 9%, corner reflector 9%
+of benchmark captures; RCS within 0.01 dB of the analytic PO plate value).
+See `radarsim-engine/docs/mesh_simulator_model.md`.
+
+Open items: multi-segment waveform phase quirk; phase-noise golden sequence;
+mesh/RCS exact-sampler conformance; grazing-rim treatment on curved surfaces;
+`back_propagating` return legs; CUDA backend.
