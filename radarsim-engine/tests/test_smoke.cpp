@@ -92,7 +92,9 @@ void TestRadarConstruction() {
     NoiseSimulator<H, L, radarsimx::cpu_policy> noise_sim;
     assert(noise_sim.Run(radar, 1.0, true, timestamps.data(), 1, 1, 400,
                          noise_real.data(), noise_imag.data(), 0) == SUCCESS);
-    assert(noise_real[0] == 0.0 && noise_imag[399] == 0.0);
+    // real noise now: keyed by (rx, timestamp); all-zero timestamps share one
+    // value, which must be nonzero
+    assert(noise_real[0] != 0.0);
 }
 
 void TestMeshAndRcs() {
@@ -106,7 +108,7 @@ void TestMeshAndRcs() {
                              rsv::Vec3<L>(0, 0, 0), rsv::Vec3<L>(0, 0, 0),
                              rsv::Vec3<L>(0, 0, 0), false, 0.0f, false);
     assert(targets->targets().size() == 1);
-    assert(targets->targets()[0]->array_size_ == 3);
+    assert(targets->targets()[0]->array_size_ == 1);  // static kinematics
     targets->targets()[0]->Move(0, 0.0);
 
     std::vector<H> freq = {77e9};
