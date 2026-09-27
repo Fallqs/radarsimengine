@@ -233,6 +233,12 @@ private:
         T t_lo = T(0);
         T t_hi = t_limit;
         for (int a = 0; a < 3; ++a) {
+            if (dir[a] == T(0)) {  // ray parallel to the slab
+                if (org[a] < box.lo[a] || org[a] > box.hi[a]) {
+                    return false;
+                }
+                continue;
+            }
             const T inv = T(1) / dir[a];
             T t0 = (box.lo[a] - org[a]) * inv;
             T t1 = (box.hi[a] - org[a]) * inv;

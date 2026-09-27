@@ -39,6 +39,30 @@ ctest --test-dir build -C Release --output-on-failure
 Options: `GPU_BUILD`, `GTEST`, `ENABLE_LICENSE` (stub), `RSIM_LOW_PRECISION`
 (`float` default, `double` for the all-FP64 reference build).
 
+### Windows without Visual Studio (verified path)
+
+The conda zig toolchain is a self-contained C++20 compiler (clang + mingw-w64):
+
+```bash
+conda create -y -n rsimdev -c conda-forge zig cmake ninja
+export ZIGCXX_ENV=<conda>/envs/rsimdev   # or set CONDA_PREFIX adjacency
+cmake -S . -B build -G Ninja \
+    -DCMAKE_CXX_COMPILER=$PWD/tools/zigcxx.bat \
+    -DCMAKE_RC_COMPILER=$PWD/tools/zigwindres.bat -DGTEST=ON
+cmake --build build && ctest --test-dir build --output-on-failure
+```
+
+### Integrated build (engine + Python package, verified)
+
+`tools/build_and_integrate.sh` builds the engine, cythonizes and compiles the
+three extension modules against it, and assembles `./radarsimpy/` so the
+**unmodified upstream pytest suite** runs against this engine:
+
+```bash
+bash radarsim-engine/tools/build_and_integrate.sh
+python -m pytest tests/
+```
+
 ## Drop in as the RadarSimPy backend
 
 ```bash
