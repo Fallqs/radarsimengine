@@ -74,15 +74,15 @@ public:
         if (density <= L(0)) {
             return RADARSIMCPP_ERROR_INVALID_PARAMETER;
         }
-        if (ray_filter[0] < 0 || ray_filter[1] < ray_filter[0]) {
+        if (ray_filter[0] < 0) {
             return RADARSIMCPP_ERROR_INVALID_PARAMETER;
         }
+        // an inverted band selects nothing (test_reflection_filter_edges)
         if (!dry_run &&
             (radar->bb_real_ == nullptr || radar->bb_imag_ == nullptr)) {
             return RADARSIMCPP_ERROR_INVALID_PARAMETER;
         }
         (void)log_path;  // HDF5 ray dump not implemented (no HDF5 dep)
-        (void)back_propagating;  // return-leg reflections: not yet implemented
 
         const auto tx = radar->tx_;
         const auto rx = radar->rx_;
@@ -120,7 +120,8 @@ public:
                         TracePass(radar, targets_manager, f_idx, m, pp,
                                   pulse_span, ss, sample_span, level,
                                   static_cast<double>(density), ray_filter,
-                                  lam_min, fc, fs, gate, waveform);
+                                  lam_min, fc, fs, gate, waveform,
+                                  back_propagating);
                     }
                 }
             }
@@ -145,12 +146,34 @@ private:
         int bounce;
     };
 
+    // A return that reflects its way back out over the surfaces the ray
+    // arrived on (back_propagating). The scattering point radiates toward the
+    // previous surface; the field reflects down the chain to the first hit,
+    // then travels to the receiver. Total bounces = 2*bounce - 1.
+    struct BackPropSample {
+        PoSample base;            // the scattering point (kernel geometry)
+        double leg_path;          // path tx -> ... -> p_i -> ... -> p_0
+        double px, py, pz;        // p_0 (the first hit), start of the rx leg
+        double ox, oy, oz;        // unit dir from p_i toward p_{i-1}
+        std::complex<double> refl_total;  // arrival x return reflections
+    };
+    std::vector<BackPropSample> bp_samples_;
+
+    struct HitRec {
+        rsv::Vec3<L> point, normal, out_dir;
+        double path;
+        std::complex<double> ef[3];
+        std::complex<double> refl;
+        int tri;
+        int bounce;
+    };
+
     void TracePass(const std::shared_ptr<Radar<H, L>> &radar,
                    const std::shared_ptr<TargetsManager<L>> &targets_manager,
                    int f_idx, int m, int p0, int p_span, int s0, int s_span,
                    int level, double density, rsv::Vec2<int_t> ray_filter,
                    double lam_min, double fc, double fs, double gate,
-                   const rsim::Waveform<H> &waveform) {
+                   const rsim::Waveform<H> &waveform, bool back_propagating) {
         const auto tx = radar->tx_;
         const auto rx = radar->rx_;
         const int n_rx = static_cast<int>(rx->channels_.size());
@@ -182,7 +205,7 @@ private:
 
         std::vector<PoSample> po_samples;
         GenerateRays(scene, tx_pos, tx->channels_[m], lam_min, density,
-                     ray_filter, po_samples);
+                     ray_filter, po_samples, back_propagating);
         if (std::getenv("RSIM_DEBUG_MESH")) {
             double area_sum = 0.0;
             for (const auto &ps : po_samples) {
@@ -195,7 +218,8 @@ private:
             for (const auto &ps : po_samples) {
                 if (ps.bounce < 16) { ++hist[ps.bounce]; bh_area[ps.bounce] += ps.area; }
             }
-            std::printf("[mesh]   bounce histogram:");
+            std::printf("[mesh]   bp samples: %zu;", bp_samples_.size());
+            std::printf("   bounce histogram:");
             for (int b = 1; b < 16; ++b)
                 if (hist[b]) std::printf(" %d:%d(a=%.5f)", b, hist[b], bh_area[b]);
             std::printf("\n");
@@ -291,6 +315,54 @@ private:
                                 static_cast<double>(mv.real()),
                                 static_cast<double>(mv.imag()));
                         }
+                        acc += contrib;
+                    }
+
+                    // back-propagated returns: the scattering point radiates
+                    // toward the previous surface; the field reflects down the
+                    // chain and reaches the receiver off the first hit
+                    for (const BackPropSample &bp : bp_samples_) {
+                        const double dx = bp.px - rx_pos[0],
+                                     dy = bp.py - rx_pos[1],
+                                     dz = bp.pz - rx_pos[2];
+                        const double R_r =
+                            std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if (R_r <= 0.0) {
+                            continue;
+                        }
+                        const double tau = (bp.leg_path + R_r) / kC;
+                        const H beat =
+                            (f_off * (u - gate) + waveform.Phase(u - gate)) -
+                            (f_off * (u - tau) + waveform.Phase(u - tau));
+
+                        const double g_db =
+                            GainAt(tx->channels_[m], rx->channels_[n], rot,
+                                   bp.base, tx_pos, rx_pos);
+
+                        const double pr_dbm =
+                            static_cast<double>(tx->tx_power_) + g_db +
+                            10.0 * std::log10(lam * lam /
+                                              (4.0 * kPi * 4.0 * kPi * 4.0 *
+                                               kPi)) +
+                            static_cast<double>(rx->rf_gain_);
+                        const double K =
+                            std::sqrt(2.0 * 1e-3 *
+                                      std::pow(10.0, pr_dbm / 10.0) *
+                                      static_cast<double>(rx->resistor_)) *
+                            std::pow(10.0,
+                                     static_cast<double>(rx->baseband_gain_) /
+                                         20.0) *
+                            (2.0 / std::sqrt(kPi));
+
+                        const double o_dir[3] = {bp.ox, bp.oy, bp.oz};
+                        const std::complex<double> val =
+                            PoKernel(bp.base, o_dir, rx->channels_[n].polar);
+                        const std::complex<double> contrib =
+                            K * k_over_2 * val * bp.refl_total * bp.base.area *
+                            std::complex<double>(0.0, 1.0) /
+                            (bp.leg_path * R_r) *
+                            std::exp(std::complex<double>(0.0,
+                                                          2.0 * kPi * beat));
                         acc += contrib;
                     }
 
@@ -390,7 +462,9 @@ private:
                       const typename Transmitter<H, L>::Channel &tx_ch,
                       double lam_min, double density,
                       rsv::Vec2<int_t> ray_filter,
-                      std::vector<PoSample> &po_samples) {
+                      std::vector<PoSample> &po_samples,
+                      bool back_propagating) {
+        bp_samples_.clear();
         const double grid = static_cast<double>(tx_ch.grid);
         if (grid <= 0.0) {
             return;
@@ -474,7 +548,8 @@ private:
                     for (int j = 0; j < count; ++j) {
                         TraceRay(scene, bvh, org, phi_start + i * fine_step,
                                  theta_start + j * fine_step, fine_step,
-                                 ray_filter, po_samples, tx_ch.polar);
+                                 ray_filter, po_samples, tx_ch.polar,
+                                 back_propagating);
                     }
                 }
             }
@@ -501,7 +576,10 @@ private:
                   double phi, double theta, double fine_step,
                   rsv::Vec2<int_t> ray_filter,
                   std::vector<PoSample> &po_samples,
-                  const rsv::Vec3<std::complex<L>> &tx_pol) {
+                  const rsv::Vec3<std::complex<L>> &tx_pol,
+                  bool back_propagating) {
+        std::vector<HitRec> chain;
+
         rsv::Vec3<L> org = origin;
         rsv::Vec3<L> dir(static_cast<L>(std::sin(theta) * std::cos(phi)),
                          static_cast<L>(std::sin(theta) * std::sin(phi)),
@@ -513,11 +591,23 @@ private:
         std::complex<double> refl(1.0, 0.0);
         double path = 0.0;
         const int max_b = ray_filter[1];
-        for (int bounce = 1; bounce <= max_b; ++bounce) {
+        bool escaped = false;
+        int bounce = 0;
+        while (bounce < max_b) {
             typename rsim::Bvh<L>::Hit hit;
             if (!bvh.ClosestHit(org, dir, hit)) {
+                escaped = true;  // genuinely left the scene
                 break;
             }
+            // degenerate seam re-hit (the two triangles of a plate share an
+            // edge; a just-reflected ray re-crossing it at ~zero distance is
+            // not a bounce): step past it without counting
+            if (hit.t < L(1e-5)) {
+                org = org + dir * (hit.t + L(1e-6));
+                path += hit.t;
+                continue;
+            }
+            ++bounce;
             const rsim::SceneTri<L> &st = scene[hit.tri];
             org = org + dir * hit.t;
             path += hit.t;
@@ -525,6 +615,18 @@ private:
             if (n.Dot(dir) > L(0)) {
                 n = n * L(-1);
             }
+            HitRec rec;
+            rec.point = org;
+            rec.normal = n;
+            rec.out_dir = dir;
+            rec.path = path;
+            for (int a = 0; a < 3; ++a) {
+                rec.ef[a] = ef[a];
+            }
+            rec.refl = refl;
+            rec.tri = hit.tri;
+            rec.bounce = bounce;
+            chain.push_back(rec);
             if (!st.skip_diffusion && bounce >= ray_filter[0] &&
                 bounce <= ray_filter[1]) {
                 PoSample ps;
@@ -567,58 +669,151 @@ private:
             dir = rsim::Reflect(dir, n);
             org = org + n * L(1e-6);
         }
+
+        if (back_propagating && escaped) {
+            BuildBackPropChain(scene, bvh, chain, fine_step, ray_filter);
+        }
     }
 
+    // Return legs for an escaped ray: the scattering point at chain index i
+    // (i >= 1) radiates toward chain[i-1], reflects down the chain to
+    // chain[0], then travels to the receiver. Legs that hit anything else
+    // first are occluded and drop the chain (docs/ray_tracing_simulation).
+    // Total bounce count of the path = bounce_i + i = 2*bounce_i - 1.
+    void BuildBackPropChain(const std::vector<rsim::SceneTri<L>> &scene,
+                            const rsim::Bvh<L> &bvh,
+                            const std::vector<HitRec> &chain, double fine_step,
+                            rsv::Vec2<int_t> ray_filter) {
+        for (size_t i = 1; i < chain.size(); ++i) {
+            const HitRec &hi = chain[i];
+            if (scene[hi.tri].skip_diffusion) {
+                continue;  // a pure reflector contributes no return
+            }
+            const int total_bounces = hi.bounce + static_cast<int>(i);
+            if (total_bounces < ray_filter[0] || total_bounces > ray_filter[1]) {
+                continue;
+            }
+            // walk the return chain, checking occlusion per leg
+            rsv::Vec3<L> cp = hi.point;
+            rsv::Vec3<L> out = hi.out_dir;
+            std::complex<double> refl_ret(1.0, 0.0);
+            double leg_path = hi.path;
+            bool blocked = false;
+            for (size_t j = i; j-- > 0;) {
+                const HitRec &hj = chain[j];
+                rsv::Vec3<L> dir(hj.point[0] - cp[0], hj.point[1] - cp[1],
+                                 hj.point[2] - cp[2]);
+                const L dist = std::sqrt(dir.Dot(dir));
+                dir = dir * (L(1) / dist);
+                // occlusion: anything between cp and the target point?
+                if (bvh.Occluded(cp + dir * L(1e-6), dir, L(1e-6),
+                                 dist - L(2e-6))) {
+                    blocked = true;
+                    break;
+                }
+                leg_path += dist;
+                // reflect the field at this surface (PEC transport)
+                const rsv::Vec3<L> &n = hj.normal;
+                const L cos_i = std::fabs(n.Dot(dir));
+                refl_ret *= rsim::FresnelTE(scene[hj.tri].eps,
+                                            scene[hj.tri].mu, cos_i);
+                out = rsim::Reflect(dir, n);
+                cp = hj.point + n * L(1e-6);
+            }
+            if (blocked) {
+                continue;
+            }
+            BackPropSample bp;
+            bp.base = PoSample{};
+            bp.base.x = hi.point[0];
+            bp.base.y = hi.point[1];
+            bp.base.z = hi.point[2];
+            bp.base.nx = hi.normal[0];
+            bp.base.ny = hi.normal[1];
+            bp.base.nz = hi.normal[2];
+            bp.base.dx = hi.out_dir[0];
+            bp.base.dy = hi.out_dir[1];
+            bp.base.dz = hi.out_dir[2];
+            bp.base.range_tx = hi.path;
+            const double cos_inc =
+                std::fabs(static_cast<double>(hi.normal.Dot(hi.out_dir)));
+            bp.base.area = fine_step * fine_step * hi.path * hi.path /
+                           std::max(cos_inc, 1e-6);
+            bp.base.grad_mag = 0.0;
+            for (int a = 0; a < 3; ++a) {
+                bp.base.einc[a] = hi.ef[a];
+            }
+            bp.base.refl = hi.refl;
+            bp.base.target_idx = scene[hi.tri].target_idx;
+            bp.base.bounce = total_bounces;
+            bp.leg_path = leg_path;
+            // the return leg radiates toward chain[i-1]
+            const double dx = chain[i - 1].point[0] - hi.point[0];
+            const double dy = chain[i - 1].point[1] - hi.point[1];
+            const double dz = chain[i - 1].point[2] - hi.point[2];
+            const double dl = std::sqrt(dx * dx + dy * dy + dz * dz);
+            bp.ox = dx / dl;
+            bp.oy = dy / dl;
+            bp.oz = dz / dl;
+            bp.px = chain[0].point[0];
+            bp.py = chain[0].point[1];
+            bp.pz = chain[0].point[2];
+            bp.refl_total = hi.refl * refl_ret;
+            bp_samples_.push_back(bp);
+        }
+    }
+
+
     // ---- PO field of one sample -------------------------------------------
-    // stuff = [o x (o x (n x (i x p_i)))] . conj(p_o), times footprint area,
-    // times the Gordon sinc on the tangential phase gradient.
+    // val = conj(p_rx) . (J - (J.o) o) with J = n x (i x E_inc).
+    // (i = propagation direction at the bounce; o = observation direction.)
+    static std::complex<double> PoKernel(const PoSample &ps,
+                                         const double o[3],
+                                         const rsv::Vec3<std::complex<L>> &rx_pol) {
+        const double n[3] = {ps.nx, ps.ny, ps.nz};
+        const double i[3] = {ps.dx, ps.dy, ps.dz};
+        // H_inc = i x E_inc
+        const std::complex<double> hx[3] = {
+            i[1] * ps.einc[2] - i[2] * ps.einc[1],
+            i[2] * ps.einc[0] - i[0] * ps.einc[2],
+            i[0] * ps.einc[1] - i[1] * ps.einc[0]};
+        // J = n x H_inc
+        const std::complex<double> jj[3] = {n[1] * hx[2] - n[2] * hx[1],
+                                            n[2] * hx[0] - n[0] * hx[2],
+                                            n[0] * hx[1] - n[1] * hx[0]};
+        const std::complex<double> jdo =
+            jj[0] * o[0] + jj[1] * o[1] + jj[2] * o[2];
+        const std::complex<double> jp[3] = {jj[0] - jdo * o[0],
+                                            jj[1] - jdo * o[1],
+                                            jj[2] - jdo * o[2]};
+        return jp[0] * std::conj(std::complex<double>(rx_pol[0])) +
+               jp[1] * std::conj(std::complex<double>(rx_pol[1])) +
+               jp[2] * std::conj(std::complex<double>(rx_pol[2]));
+    }
+
+    // PO field of one forward sample: kernel times footprint area times the
+    // Gordon sinc, with 1/(Rt Rr) spreading.
     std::complex<double> PoField(const PoSample &ps,
                                  const rsv::Vec3<double> &tx_pos,
                                  const rsv::Vec3<double> &rx_pos,
                                  const rsv::Vec3<std::complex<L>> &tx_pol,
                                  const rsv::Vec3<std::complex<L>> &rx_pol,
                                  double k) {
+        (void)tx_pol;  // the incident field is the transported tx pol
         const double Rr = std::sqrt((ps.x - rx_pos[0]) * (ps.x - rx_pos[0]) +
                                     (ps.y - rx_pos[1]) * (ps.y - rx_pos[1]) +
                                     (ps.z - rx_pos[2]) * (ps.z - rx_pos[2]));
         const double o[3] = {-(ps.x - rx_pos[0]) / Rr, -(ps.y - rx_pos[1]) / Rr,
                              -(ps.z - rx_pos[2]) / Rr};  // sample -> rx
-        const double n[3] = {ps.nx, ps.ny, ps.nz};
-        const double i[3] = {ps.dx, ps.dy, ps.dz};  // propagation direction
-        (void)tx_pol;  // the incident field is the transported tx pol
-        // PO surface current J = 2 n x H_inc, H_inc = i x E_inc
-        const std::complex<double> hx[3] = {
-            i[1] * ps.einc[2] - i[2] * ps.einc[1],
-            i[2] * ps.einc[0] - i[0] * ps.einc[2],
-            i[0] * ps.einc[1] - i[1] * ps.einc[0]};
-        const std::complex<double> jj[3] = {n[1] * hx[2] - n[2] * hx[1],
-                                            n[2] * hx[0] - n[0] * hx[2],
-                                            n[0] * hx[1] - n[1] * hx[0]};
-        // radiate the part of J perpendicular to o, project on conj(rx_pol)
-        const std::complex<double> jdo =
-            jj[0] * o[0] + jj[1] * o[1] + jj[2] * o[2];
-        const std::complex<double> jp[3] = {jj[0] - jdo * o[0],
-                                            jj[1] - jdo * o[1],
-                                            jj[2] - jdo * o[2]};
-        const std::complex<double> val =
-            jp[0] * std::conj(std::complex<double>(rx_pol[0])) +
-            jp[1] * std::conj(std::complex<double>(rx_pol[1])) +
-            jp[2] * std::conj(std::complex<double>(rx_pol[2]));
-
-        // Gordon footprint: the footprint is the ray tube projected on the
-        // surface -- an ellipse stretched by 1/cos_inc along the incidence
-        // plane. The phase ramp runs along the gradient, so the relevant
-        // extent is w = R*step/cos_inc (= sqrt(area/cos_inc)); grazing
-        // footprints are long across a steep ramp and suppress hard.
+        const std::complex<double> val = PoKernel(ps, o, rx_pol);
         const double g = GradMag(ps, tx_pos, rx_pos, k);
         const double cos_inc =
             std::fabs(ps.nx * ps.dx + ps.ny * ps.dy + ps.nz * ps.dz);
-        // footprint extent along the phase gradient: the tube projected on
-        // the surface stretches by 1/cos_inc in the incidence plane
         const double w = std::sqrt(ps.area) / std::max(cos_inc, 1e-6);
         const double sinc = Sinc(g * w / (2.0 * kPi));
         return val * ps.area * sinc * sinc / (ps.range_tx * Rr);
     }
+
 
     // |tangential phase gradient| of the footprint: the PO current ramps as
     // k*i.r under the local illumination and the observation picks up -k*o.r,
