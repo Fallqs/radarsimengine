@@ -132,11 +132,92 @@ void TestPlateRcs() {
     }
 }
 
+void TestTimeVaryingTargetIndex() {
+    // Guards the timestamp-grid index used to pose time-varying targets at
+    // each pass instant (MeshSimulator::BuildScene). With the index
+    // miscomputed (e.g. derived from seconds), every pass poses the target
+    // from entry 0 and the per-sample outputs coincide.
+    std::vector<H> f = {24.125e9, 24.125e9};
+    std::vector<H> t = {0.0, 2e-6};
+    std::vector<H> foff = {0.0};
+    std::vector<H> pstart = {0.0};
+    auto tx = std::make_shared<Transmitter<H, L>>(L(10), f, t, foff, pstart);
+    tx->AddChannel(rsv::Vec3<L>(0, 0, 0),
+                   rsv::Vec3<std::complex<L>>({0, 0}, {0, 0}, {1, 0}),
+                   {-1.5707963f, 1.5707963f}, {0.0f, 0.0f},
+                   {0.0f, 3.1415927f}, {0.0f, 0.0f}, 0.0f, {0.0f},
+                   {std::complex<L>(1, 0)},
+                   {std::complex<L>(1, 0)},
+                   0.0f, L(1.0f * 3.1415927f / 180.0f));
+    auto rx = std::make_shared<Receiver<L>>(L(1e6), L(20), L(500), L(30),
+                                            L(1e6), 0.0);
+    rx->AddChannel(rsv::Vec3<L>(0, 0, 0),
+                   rsv::Vec3<std::complex<L>>({0, 0}, {0, 0}, {1, 0}),
+                   {-1.5707963f, 1.5707963f}, {0.0f, 0.0f},
+                   {0.0f, 3.1415927f}, {0.0f, 0.0f}, 0.0f);
+    std::vector<H> frame_start = {0.0};
+    std::vector<rsv::Vec3<L>> loc = {rsv::Vec3<L>(0, 0, 0)};
+    std::vector<rsv::Vec3<L>> rot = {rsv::Vec3<L>(0, 0, 0)};
+    auto radar = std::make_shared<Radar<H, L>>(tx, rx, frame_start, loc,
+                                               rsv::Vec3<L>(0, 0, 0), rot,
+                                               rsv::Vec3<L>(0, 0, 0));
+
+    // 5x5 plate in the y-z plane; kinematics expanded on the flat timestamp
+    // grid (1 frame x 1 channel x 1 pulse x 2 samples): entry 0 at x=10,
+    // entry 1 at x=20
+    std::vector<L> points = {0, -2.5f, -2.5f, 0, 2.5f, -2.5f,
+                             0, 2.5f,  2.5f,  0, -2.5f, 2.5f};
+    std::vector<int_t> cells = {0, 1, 2, 0, 2, 3};
+    std::vector<rsv::Vec3<L>> loc2 = {rsv::Vec3<L>(10, 0, 0),
+                                      rsv::Vec3<L>(20, 0, 0)};
+    std::vector<rsv::Vec3<L>> zero2 = {rsv::Vec3<L>(0, 0, 0),
+                                       rsv::Vec3<L>(0, 0, 0)};
+    auto tgts = std::make_shared<TargetsManager<L>>();
+    tgts->AddTarget(points.data(), cells.data(), 2, rsv::Vec3<L>(0, 0, 0),
+                    loc2, zero2, zero2, zero2,
+                    std::complex<L>(1e38f, 0.0f), std::complex<L>(1.0f, 0.0f),
+                    false, 0.0f, false);
+
+    std::vector<H> re(2, 0), im(2, 0);
+    radar->InitBaseband(re.data(), im.data());
+    MeshSimulator<H, L, radarsimx::cpu_policy> sim;
+    Check(sim.Run(radar, tgts, 2, 1.0f, rsv::Vec2<int_t>(0, 10), false, "",
+                  false) == SUCCESS,
+          "time-varying mesh Run");
+
+    const std::complex<double> s0(re[0], im[0]), s1(re[1], im[1]);
+    // discriminating invariant: the two passes must see different kinematics
+    // entries (a miscomputed index poses both from entry 0 and the outputs
+    // coincide exactly for this CW waveform, whose beat is u-independent)
+    if (std::abs(s1 - s0) < 0.1 * std::abs(s0)) {
+        std::printf("FAIL: time-varying idx: samples coincide "
+                    "(%.6e%+.6ej vs %.6e%+.6ej) -- both passes posed "
+                    "entry 0\n", s0.real(), s0.imag(), s1.real(), s1.imag());
+        ++g_failures;
+    }
+    // self-captured guard values (this engine), 1e-3 relative
+    const std::complex<double> ref[2] = {
+        {4.899248e-02, -1.751534e-02},
+        {-1.926321e-02, 3.345133e-02},
+    };
+    const double peak = std::max(std::abs(ref[0]), std::abs(ref[1]));
+    for (int s = 0; s < 2; ++s) {
+        const std::complex<double> got(re[s], im[s]);
+        if (std::abs(got - ref[s]) > 1e-3 * peak) {
+            std::printf("FAIL: time-varying mesh s%d: %.6e%+.6ej vs ref, "
+                        "err %.3e\n", s, got.real(), got.imag(),
+                        std::abs(got - ref[s]));
+            ++g_failures;
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
     TestPlateMesh();
     TestPlateRcs();
+    TestTimeVaryingTargetIndex();
     if (g_failures == 0) {
         std::printf("test_mesh_regression: all passed\n");
         return 0;
