@@ -1,5 +1,24 @@
 # 05 — Roadmap
 
+## 5.0 As-executed status (2026-09)
+
+| Phase | State |
+|-------|-------|
+| 0 Skeleton/binding | done |
+| 1 Point/noise/interference | done — ideal/noise/pulsed/range-gate suites pass at tolerance |
+| 2 Geometry core | done — BVH validated vs brute force; `cp_GetTargetMesh` parity |
+| 3 RCS | done — exact closed-form facet phase integral; plate exact, sphere ±1.2 dB of πr² over 2–30 GHz (`radarsim-engine/tools/validate_rcs_analytic.py`) |
+| 4 Mesh SBR+PO | done — incl. back_propagating, ray_filter, fidelity levels, deterministic parallel merge; `log_path` (HDF5) not implemented |
+| 5 LiDAR | done — `test_module_sim_lidar.py` passes |
+| 6 CUDA | not started — no GPU/driver/CUDA toolchain on the dev machine |
+
+Suite: 427 passed / 36 failed / 45 skipped. The 36 failures are documented
+divergences that encode closed-engine internals (exact ray sampler, PO LUT,
+phase-noise generator bits, f32 rounding profile) — see
+`radarsim-engine/docs/mesh_simulator_model.md` and `point_simulator_model.md`.
+Performance: 2.4–14× faster than the recorded closed-engine CPU baseline on
+all 25 `bench_sbr.py` points (docs/06-validation.md §6.5).
+
 ## 5.1 Strategy
 
 Bottom-up, continuously verifiable. Every phase ends with a runnable artifact

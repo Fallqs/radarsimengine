@@ -99,6 +99,14 @@ analytics is required where both exist.
   triangle count (`benchmarks/scenes.py`) — perf investigations should start
   from ray counts, not mesh size.
 
+**Measured (radarsim-engine, this machine, `cpu_baseline.json` sweep):**
+2.4x–14x *faster* than the recorded closed-engine CPU baseline on all 25
+points (median ≈ 6x) — e.g. ball_1m density=1: 1.19 s → 0.15 s;
+plate5x5: 14.6 s → 4.0 s; level=sample ball: 10.7 s → 0.8 s. The N6 gate is
+met with margin. Caveat: part of the margin plausibly comes from launching
+fewer rays than the closed sampler (the documented sampler divergence), so
+this is not claimed as like-for-like kernel efficiency.
+
 ## 6.6 Regression infrastructure
 
 - `benchmarks/capture_reference.py`: six scenes chosen for code-path coverage;
