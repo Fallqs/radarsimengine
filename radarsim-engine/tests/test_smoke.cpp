@@ -117,8 +117,16 @@ void TestMeshAndRcs() {
     std::vector<H> pst = {0.0};
     auto tx = std::make_shared<Transmitter<H, L>>(0.0f, freq, freq_time, foff,
                                                   pst);
+    tx->AddChannel(rsv::Vec3<L>(0, 0, 0),
+                   rsv::Vec3<std::complex<L>>({0, 0}, {0, 0}, {1, 0}),
+                   {0.0f}, {0.0f}, {0.0f}, {0.0f}, 0.0f, {0.0f},
+                   {std::complex<L>(1, 0)}, {std::complex<L>(1, 0)}, 0.0f,
+                   0.0f);
     auto rx = std::make_shared<Receiver<L>>(1e6f, 0.0f, 500.0f, 0.0f, 1e6f,
                                             0.0);
+    rx->AddChannel(rsv::Vec3<L>(0, 0, 0),
+                   rsv::Vec3<std::complex<L>>({0, 0}, {0, 0}, {1, 0}),
+                   {0.0f}, {0.0f}, {0.0f}, {0.0f}, 0.0f);
     std::vector<H> frame_start = {0.0};
     std::vector<rsv::Vec3<L>> loc = {rsv::Vec3<L>(0, 0, 0)};
     std::vector<rsv::Vec3<L>> rot_arr = {rsv::Vec3<L>(0, 0, 0)};

@@ -54,7 +54,37 @@ multibounce, plate near-field, sphere ~pi r^2), and keep golden-exact
 matching as a tracked divergence. The Python reference harness
 (`tools/pysim/`) gets a mesh path first for fast iteration.
 
-## Data assets for this work
+## Phase 4 state (C++ implementation landed)
+
+`includes/simulator_mesh.hpp` implements the full pipeline: occupancy probe
+grid (phi in [-90,90], theta in [0,180], step = channel grid), the documented
+fine-ray sizing (`fine_step = atan(lam_min/density/R)`, `count =
+int(grid/fine_step)+1`, lower-edge anchored), specular multi-bounce with
+Fresnel coefficients, skip_diffusion, and vector-PO samples.
+
+Key validated physics:
+
+- **Vector E-field transport through bounces is essential** — a scalar
+  Fresnel + untransported polarization loses a factor of 3 on the corner
+  reflector (its co-pol triple-bounce return has |kernel| = 0.32 with the
+  naive kernel, 1.15 with transport). PEC transport: E' = 2(E.n)n - E.
+- The PO sample kernel is `val = conj(p_rx) . (J - (J.o) o)` with
+  `J = n x (i x E_inc)` (factor-2 folded into normalization).
+- The Gordon footprint sinc uses the footprint extent along the phase
+  gradient (tube radius stretched by 1/cos_incidence).
+
+Benchmark-capture conformance (peak-relative max err):
+plate_normal 9.3%, corner_multibounce 8.8%, sphere/ grazing cases ~7-11x
+(rim treatment differs), turbine 1.5x. The plate and corner reflector — the
+canonical specular and multibounce cases — are within 10%.
+
+## Remaining divergences (tracked)
+
+1. The exact sampler layout (occupancy probing details, Gordon/LUT
+   internals) — the 3e-5-of-peak golden tolerance requires the engine's
+   exact discrete computation.
+2. Grazing-incidence rim treatment on curved surfaces (sphere ~10x over).
+3. `back_propagating` return-leg reflections are not yet implemented.
 
 - `tests/test_module_sim_radar_mesh.py` — 22 golden scenarios.
 - `benchmarks/baseline/cpu_reference.npz` — six full baseband captures with
