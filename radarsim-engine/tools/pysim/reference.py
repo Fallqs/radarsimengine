@@ -56,9 +56,11 @@ def _waveform_phase_fn(f, t):
     return phi
 
 
-def _rot_matrix(yaw_pitch_roll_deg):
-    """R = Rz(yaw) Ry(-pitch) Rx(roll), angles in degrees (radar convention)."""
-    yaw, pitch, roll = np.radians(np.asarray(yaw_pitch_roll_deg, dtype=float))
+def _rot_matrix(yaw_pitch_roll):
+    """R = Rz(yaw) Ry(-pitch) Rx(roll). Input in RADIANS: radar_prop stores
+    platform rotation converted to radians (radar.py:844,876-881), and the
+    C++ motion lib receives radians."""
+    yaw, pitch, roll = np.asarray(yaw_pitch_roll, dtype=float)
     cy, sy = np.cos(yaw), np.sin(yaw)
     cp, sp = np.cos(pitch), np.sin(pitch)
     cr, sr = np.cos(roll), np.sin(roll)
@@ -96,12 +98,20 @@ def _channel_view_angles(direction_body):
 
 
 def _platform_pose(radar, T):
-    """Platform location and rotation matrix at absolute time T."""
+    """Platform location and rotation matrix at absolute time T.
+
+    Geometry is staged in float32 exactly as the engine receives it
+    (locations/rotations are narrowed to float_t at marshalling,
+    cp_radarsimc_radar.pyx:354-379). The rotation matrix is built from the
+    float32 angles -- sin(f32(pi)) = -8.74e-8, which is measurable in the
+    golden references (test_system_interference carries a +7.8e-4 rad
+    offset from exactly this).
+    """
     rp = radar.radar_prop
-    loc = np.asarray(rp["location"], dtype=float)
-    rot = np.asarray(rp["rotation"], dtype=float)
-    speed = np.asarray(rp["speed"], dtype=float)
-    rate = np.asarray(rp["rotation_rate"], dtype=float)
+    loc = np.asarray(rp["location"], dtype=np.float32).astype(float)
+    rot = np.asarray(rp["rotation"], dtype=np.float32).astype(float)
+    speed = np.asarray(rp["speed"], dtype=np.float32).astype(float)
+    rate = np.asarray(rp["rotation_rate"], dtype=np.float32).astype(float)
     if loc.ndim == 1:
         return loc + speed * T, _rot_matrix(rot + rate * T)
     raise NotImplementedError("time-varying platform motion not yet supported")
@@ -192,12 +202,20 @@ def sim_interference_reference(radar, interf):
                     )
                     plat_v, rot_v = _platform_pose(radar, T)
                     rx_pos = plat_v + rot_v @ np.asarray(
-                        rx_v.rxchannel_prop["locations"][n], dtype=float
+                        np.asarray(
+                            rx_v.rxchannel_prop["locations"][n],
+                            dtype=np.float32,
+                        ),
+                        dtype=float,
                     )
                     for q in range(pulses_i):
                         plat_i, rot_i = _platform_pose(interf, T)
                         tx_pos_i = plat_i + rot_i @ np.asarray(
-                            tx_i.txchannel_prop["locations"][mi], dtype=float
+                            np.asarray(
+                                tx_i.txchannel_prop["locations"][mi],
+                                dtype=np.float32,
+                            ),
+                            dtype=float,
                         )
                         R = np.linalg.norm(tx_pos_i - rx_pos)
                         if R == 0.0:
@@ -242,8 +260,9 @@ def sim_interference_reference(radar, interf):
                             * 10 ** (rx_v.rf_prop["rf_gain"] / 20)
                             * 10 ** (bb["baseband_gain"] / 20)
                         )
+                        gate = float(bb.get("gate_delay", 0.0))
                         ph = 2 * np.pi * (
-                            (foff_v[p] * u_v + phi_v_base(u_v))
+                            (foff_v[p] * (u_v - gate) + phi_v_base(u_v - gate))
                             - (foff_i[q] * u_i + phi_i_base(u_i))
                         )
                         pol = np.abs(
@@ -262,6 +281,141 @@ def sim_interference_reference(radar, interf):
     return out
 
 
+def _interpolate_pn_power(freq, power, f_grid):
+    """Log-scale SSB mask interpolation, mirrors radar.py's
+    _interpolate_phase_noise_power including the realmin offsets."""
+    realmin = float(np.finfo(np.float64).tiny)
+    log_p = np.zeros(len(f_grid))
+    for i in range(len(freq)):
+        left = freq[i]
+        t1 = power[i]
+        if i == len(freq) - 1:
+            right = f_grid[-1] * 2
+            t2 = power[-1]
+            inside = (f_grid >= left) & (f_grid <= right)
+        else:
+            right = freq[i + 1]
+            t2 = power[i + 1]
+            inside = (f_grid >= left) & (f_grid < right)
+        log_p[inside] = t1 + (
+            (np.log10(f_grid[inside] + realmin) - np.log10(left + realmin))
+            / (np.log10(right + 2 * realmin) - np.log10(left + realmin))
+        ) * (t2 - t1)
+    return 10 ** (log_p / 10)
+
+
+def _phase_noise_phase(radar):
+    """Phase-noise phase deviation phi_pn(u) per sample index, or None.
+
+    Replicates radar.cal_phase_noise: log-interpolated SSB mask shapes a
+    deterministic spectrum (validation=True fixes AWGN to (1+1j)/sqrt(2)),
+    IFFT, phi = real(x_t). The engine regenerates this per frame; in
+    validation mode the sequence is deterministic and identical.
+    """
+    sp = radar.sample_prop
+    if sp.get("pn_f") is None:
+        return None
+    freq = np.asarray(sp["pn_f"], dtype=float)
+    power = np.asarray(sp["pn_power"], dtype=float)
+    fs = float(sp["pn_fs"])
+    num_samples = int(sp["samples_per_pulse"])
+
+    order = np.argsort(freq)
+    freq, power = freq[order], power[order]
+    keep = freq < fs / 2
+    freq, power = freq[keep], power[keep]
+    if 0 not in freq:
+        freq = np.concatenate(([0.0], freq))
+        power = np.concatenate(([0.0], power))
+
+    if num_samples % 2:
+        num_f = (num_samples + 1) // 2 + 1
+    else:
+        num_f = num_samples // 2 + 1
+    f_grid = np.linspace(0, fs / 2, num_f)
+    delta_f = np.concatenate((np.diff(f_grid), [f_grid[-1] - f_grid[-2]]))
+    p_interp = _interpolate_pn_power(freq, power, f_grid)
+
+    if sp.get("pn_validation", False):
+        awgn = np.sqrt(0.5) * (np.ones(num_f) + 1j * np.ones(num_f))
+    else:
+        rng = np.random.default_rng(sp.get("pn_seed") or None)
+        awgn = np.sqrt(0.5) * (
+            rng.standard_normal(num_f) + 1j * rng.standard_normal(num_f)
+        )
+    spec = num_f * np.sqrt(delta_f * p_interp) * awgn
+
+    full = np.zeros(2 * num_f - 2, dtype=complex)
+    full[:num_f] = spec
+    full[num_f:] = np.fliplr([np.conjugate(spec[1:-1])])[0]
+    full[0] = 0.0
+    x_t = np.fft.ifft(full)
+    return np.real(x_t[:num_samples])  # phi_pn per fast-time sample
+
+
+def _pn_factor(phi_pn, u, tau, fs):
+    """exp(-j*(phi(u-tau) - phi(u))): echo carries the oscillator phase at
+    emission, the LO carries it now; linear interpolation between samples."""
+    idx_hi = u * fs
+    idx_lo = (u - tau) * fs
+
+    def at(idx):
+        i0 = np.floor(idx)
+        frac = idx - i0
+        i0 = int(i0) % len(phi_pn)
+        i1 = (i0 + 1) % len(phi_pn)
+        return phi_pn[i0] * (1 - frac) + phi_pn[i1] * frac
+
+    return np.exp(-1j * (at(idx_lo) - at(idx_hi)))
+
+
+def _splitmix64(x):
+    x = (x + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    return x ^ (x >> 31)
+
+
+def _noise_normals(seed, rx_idx, timestamp):
+    """Deterministic Gaussian pair keyed by (seed, rx channel, timestamp).
+
+    The noise contract (tests/test_noise_simulation.py): channels sharing an
+    Rx AND bit-identical timestamps get identical noise; everything else is
+    independent. Hashing the float64 timestamp bits satisfies both.
+    """
+    ts_bits = int(np.float64(timestamp).view(np.int64))
+    h1 = _splitmix64((seed ^ ts_bits) & 0xFFFFFFFFFFFFFFFF)
+    h1 = _splitmix64(h1 ^ (((rx_idx + 1) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF))
+    h2 = _splitmix64(h1)
+    u1 = (h1 >> 11) / float(1 << 53)
+    u2 = (h2 >> 11) / float(1 << 53)
+    u1 = max(u1, 1e-300)
+    r = np.sqrt(-2.0 * np.log(u1))
+    return r * np.cos(2 * np.pi * u2), r * np.sin(2 * np.pi * u2)
+
+
+def _noise_array(radar):
+    """NoiseSimulator reference: per-sample noise keyed by (rx, timestamp)."""
+    rx = radar.radar_prop["receiver"]
+    tx = radar.radar_prop["transmitter"]
+    level = radar.sample_prop["noise"]
+    is_complex = rx.bb_prop["bb_type"] == "complex"
+    n_rx = int(rx.rxchannel_prop["size"])
+    ts = radar.time_prop["timestamp"]
+    noise = np.zeros(ts.shape, dtype=np.complex128)
+    seed = 0  # the binding always passes seed 0 (simulator_radar.pyx:403,418)
+    for ch in range(ts.shape[0]):
+        n = ch % n_rx
+        for p in range(ts.shape[1]):
+            for s in range(ts.shape[2]):
+                re, im = _noise_normals(seed, n, ts[ch, p, s])
+                if is_complex:
+                    noise[ch, p, s] = level * (re + 1j * im) / np.sqrt(2)
+                else:
+                    noise[ch, p, s] = level * re
+    return noise
+
+
 def sim_radar_reference(radar, targets, interf=None, **_kwargs):
     """Reference implementation of sim_radar (point targets only)."""
     tx = radar.radar_prop["transmitter"]
@@ -276,6 +430,7 @@ def sim_radar_reference(radar, targets, interf=None, **_kwargs):
     pulses = int(wf["pulses"])
 
     fs = float(bb["fs"])
+    gate_delay = float(bb.get("gate_delay", 0.0))
     frame_start = np.atleast_1d(
         np.asarray(radar.time_prop["frame_start_time"], dtype=float)
     )
@@ -292,6 +447,7 @@ def sim_radar_reference(radar, targets, interf=None, **_kwargs):
     fc_base = 0.5 * (f.min() + f.max())
 
     phi_base = _waveform_phase_fn(f, t)
+    phi_pn = _phase_noise_phase(radar)
 
     txch = tx.txchannel_prop
     rxch = rx.rxchannel_prop
@@ -321,10 +477,12 @@ def sim_radar_reference(radar, targets, interf=None, **_kwargs):
                         )
                         plat_loc, plat_rot = _platform_pose(radar, T)
                         tx_pos = plat_loc + plat_rot @ np.asarray(
-                            txch["locations"][m], dtype=float
+                            np.asarray(txch["locations"][m], dtype=np.float32),
+                            dtype=float,
                         )
                         rx_pos = plat_loc + plat_rot @ np.asarray(
-                            rxch["locations"][n], dtype=float
+                            np.asarray(rxch["locations"][n], dtype=np.float32),
+                            dtype=float,
                         )
 
                         for tgt in targets:
@@ -372,7 +530,9 @@ def sim_radar_reference(radar, targets, interf=None, **_kwargs):
                                 * np.sqrt(2)
                             )
 
-                            beat = phi(u) - phi(u - tau)
+                            # deramp reference = chirp delayed by gate_delay
+                            # (stretch processing; target at gate range -> DC)
+                            beat = phi(u - gate_delay) - phi(u - tau)
                             val = (
                                 amp
                                 * pol_factor
@@ -383,15 +543,25 @@ def sim_radar_reference(radar, targets, interf=None, **_kwargs):
                             if tx_mod["enabled"]:
                                 val *= _mod_zoh(tx_mod, u - tau)
                             val *= txch["pulse_mod"][m][p]
+                            if phi_pn is not None:
+                                val *= _pn_factor(phi_pn, u, tau, fs)
                             baseband[ch, p, s] += val
 
     interference = None
     if interf is not None:
         interference = sim_interference_reference(radar, interf)
 
+    noise = _noise_array(radar)
+    if rx.bb_prop["bb_type"] == "real":
+        # single (real) mixer: only the in-phase component survives
+        baseband = baseband.real
+        noise = noise.real
+        if interference is not None:
+            interference = interference.real
+
     return {
         "baseband": baseband,
-        "noise": None,
+        "noise": noise,
         "timestamp": timestamp,
         "interference": interference,
     }
@@ -413,18 +583,18 @@ def _mod_zoh(mod, u_echo):
     """Waveform modulation: zero-order hold over the mod_t table, evaluated at
     the echo's transmit time.
 
-    Recovered from the pulsed-radar and waveform-modulation goldens plus the
-    upstream "modulation index fix" commit: the table index is
-    ``floor((u_echo - mod_t[0]) / step) + 1`` with ``step = mod_t[1] -
-    mod_t[0]``, and out-of-range indices contribute zero.
+    The table is PERIODIC: idx = floor((u_echo - mod_t[0])/step) + 1 taken with
+    floor-modulo over the table length. Negative indices arise from echoes
+    emitted during an earlier pulse (test_pulsed_radar_ambiguous_range_no_ghost
+    documents the upstream bug where C++ truncation painted ghosts); proper
+    floor-mod folds them into the table and the echo appears at the wrapped
+    position.
     """
     mt = np.asarray(mod["t"], dtype=float)
     var = np.asarray(mod["var"])
     step = mt[1] - mt[0]
     idx = int(np.floor((u_echo - mt[0]) / step)) + 1
-    if 0 <= idx < len(var):
-        return var[idx]
-    return 0.0 + 0.0j
+    return var[idx % len(var)]
 
 
 def _ch(channel_prop, idx):
@@ -438,10 +608,10 @@ def _ch(channel_prop, idx):
 
 
 def _target_state_at(target, T, ch, p, s):
-    loc = np.asarray(target["location"], dtype=float)
-    speed = np.asarray(target.get("speed", (0, 0, 0)), dtype=float)
-    rcs = np.asarray(target.get("rcs", 0.0), dtype=float)
-    phase = np.asarray(target.get("phase", 0.0), dtype=float)
+    loc = np.asarray(target["location"], dtype=np.float32).astype(float)
+    speed = np.asarray(target.get("speed", (0, 0, 0)), dtype=np.float32).astype(float)
+    rcs = np.asarray(target.get("rcs", 0.0), dtype=np.float32).astype(float)
+    phase = np.asarray(target.get("phase", 0.0), dtype=np.float32).astype(float)
 
     if loc.ndim == 1:
         pos = loc + speed * T

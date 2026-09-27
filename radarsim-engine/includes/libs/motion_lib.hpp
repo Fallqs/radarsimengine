@@ -1,9 +1,13 @@
 // ==============================================================================
 // radarsim-engine — libs/motion_lib.hpp
 // Orientation math. The rotation convention is load-bearing
-// (README "Coordinate Systems"): [yaw, pitch, roll] in degrees, applied as
+// (README "Coordinate Systems"): [yaw, pitch, roll], applied as
 // R = Rz(yaw) · Ry(-pitch) · Rx(roll) — the aerospace "nose up is positive"
 // convention; pitch is NOT a right-handed rotation about +y.
+//
+// Angles are in RADIANS: the Python layer converts before marshalling
+// (radar.py:844 stores platform rotation via np.radians; cp_radarsimc_mesh.pyx
+// converts target rotation the same way).
 // ==============================================================================
 #pragma once
 
@@ -11,17 +15,11 @@
 
 #include "rsvector.hpp"
 
-namespace rsim_motion {
-
-constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
-
-}  // namespace rsim_motion
-
 template <typename T>
 rsv::Vec3<T> Rotate(const rsv::Vec3<T> &vect, const rsv::Vec3<T> &rotation) {
-    const double yaw = rotation[0] * rsim_motion::kDegToRad;
-    const double pitch = rotation[1] * rsim_motion::kDegToRad;
-    const double roll = rotation[2] * rsim_motion::kDegToRad;
+    const double yaw = rotation[0];
+    const double pitch = rotation[1];
+    const double roll = rotation[2];
 
     const double cy = std::cos(yaw), sy = std::sin(yaw);
     const double cp = std::cos(pitch), sp = std::sin(pitch);

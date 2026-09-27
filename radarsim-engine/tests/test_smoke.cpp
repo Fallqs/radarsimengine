@@ -32,7 +32,8 @@ namespace {
 
 void TestVecAndRotation() {
     rsv::Vec3<L> v(1.0f, 0.0f, 0.0f);
-    rsv::Vec3<L> rot(90.0f, 0.0f, 0.0f);  // yaw 90 deg: +x -> +y
+    const float pi_2 = 1.5707963267948966f;
+    rsv::Vec3<L> rot(pi_2, 0.0f, 0.0f);  // yaw 90 deg (radians): +x -> +y
     rsv::Vec3<L> r = Rotate(v, rot);
     assert(std::fabs(r[0]) < 1e-6f);
     assert(std::fabs(r[1] - 1.0f) < 1e-6f);
