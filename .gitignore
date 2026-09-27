@@ -138,3 +138,6 @@ gen_docs/_build/
 
 debug/*
 /hdf5-analyzer
+
+# Cython generated build dir (radarsim-engine integration)
+build-cython/
