@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+build-*/
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.lib
+*.pyd
+
+# Test artifacts
+Testing/
