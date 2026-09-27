@@ -102,6 +102,12 @@ opt-in enhancement that must not regress the conformance suite.
 | 6 | CUDA | 8–12 wk |
 | **Total** | CPU parity ≈ 6–8 eng-months; with GPU ≈ 10–14 eng-months | |
 
+- **M3a** (end Phase 3, as executed): the RCS golden values embed the engine's
+  exact PO surface-sampling grid, which is the SBR ray generator's grid.
+  Reverse-engineering it from 5 RCS numbers proved underdetermined, so Phase 3
+  was reordered after Phase 4: the mesh suite's dense goldens pin the ray
+  generator, and RCS then reuses it.
+
 ## 5.4 Risk register
 
 | # | Risk | Impact | Mitigation |
