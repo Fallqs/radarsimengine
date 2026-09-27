@@ -191,8 +191,8 @@ private:
 
         // move targets to the pass instant and build the scene
         std::vector<rsim::SceneTri<L>> scene;
-        std::vector<rsv::Vec3<L>> target_vel;
-        BuildScene(targets_manager, T_pass, scene, target_vel);
+        std::vector<TargetMotion> target_motion;
+        BuildScene(targets_manager, T_pass, scene, target_motion);
         if (scene.empty()) {
             return;
         }
@@ -269,7 +269,7 @@ private:
                         }
                         double R_t = ps.range_tx;
                         if (dt != 0.0) {
-                            R_t += RangeRate(ps, target_vel, tx_pos, rx_pos) *
+                            R_t += RangeRate(ps, target_motion, tx_pos, rx_pos) *
                                    dt;
                         }
                         const double tau = (R_t + R_r) / kC;
@@ -424,10 +424,16 @@ private:
     }
 
     // ---- scene assembly ----------------------------------------------------
+    struct TargetMotion {
+        rsv::Vec3<L> vel;       // bulk speed
+        rsv::Vec3<L> rotrate;   // angular rate (rad/s)
+        rsv::Vec3<double> center;  // current world rotation centre
+    };
+
     void BuildScene(
         const std::shared_ptr<TargetsManager<L>> &targets_manager,
         double T_pass, std::vector<rsim::SceneTri<L>> &scene,
-        std::vector<rsv::Vec3<L>> &target_vel) {
+        std::vector<TargetMotion> &target_motion) {
         const auto &targets = targets_manager->targets();
         int ti = 0;
         for (const auto &tgt : targets) {
@@ -461,7 +467,17 @@ private:
                 st.target_idx = ti;
                 scene.push_back(st);
             }
-            target_vel.push_back(tgt->speed_array_[0]);
+            TargetMotion tm;
+            tm.vel = tgt->speed_array_[0];
+            tm.rotrate = tgt->rotrate_array_[0];
+            // world centre of rotation: the target origin under the pose
+            const rsv::Vec3<L> &lc = tgt->location_array_[
+                tgt->array_size_ > 1 ? idx : 0];
+            tm.center = rsv::Vec3<double>(
+                static_cast<double>(tgt->origin_[0] + lc[0]),
+                static_cast<double>(tgt->origin_[1] + lc[1]),
+                static_cast<double>(tgt->origin_[2] + lc[2]));
+            target_motion.push_back(tm);
             ++ti;
         }
     }
@@ -936,14 +952,22 @@ private:
     }
 
     double RangeRate(const PoSample &ps,
-                     const std::vector<rsv::Vec3<L>> &target_vel,
+                     const std::vector<TargetMotion> &target_motion,
                      const rsv::Vec3<double> &tx_pos,
                      const rsv::Vec3<double> &rx_pos) {
         if (ps.target_idx < 0 ||
-            ps.target_idx >= static_cast<int>(target_vel.size())) {
+            ps.target_idx >= static_cast<int>(target_motion.size())) {
             return 0.0;
         }
-        const rsv::Vec3<L> &v = target_vel[ps.target_idx];
+        const TargetMotion &tm = target_motion[ps.target_idx];
+        const rsv::Vec3<L> &w = tm.rotrate;
+        // point velocity = bulk speed + omega x (point - centre)
+        const double rx_ = ps.x - tm.center[0], ry_ = ps.y - tm.center[1],
+                     rz_ = ps.z - tm.center[2];
+        const double vx = tm.vel[0] + (w[1] * rz_ - w[2] * ry_);
+        const double vy = tm.vel[1] + (w[2] * rx_ - w[0] * rz_);
+        const double vz = tm.vel[2] + (w[0] * ry_ - w[1] * rx_);
+        const rsv::Vec3<double> v(vx, vy, vz);
         if (v[0] == 0 && v[1] == 0 && v[2] == 0) {
             return 0.0;
         }
