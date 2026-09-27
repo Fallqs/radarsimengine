@@ -109,10 +109,14 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(radarsimcpp PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
-# Windows: export symbols from the DLL
+# Windows: export symbols from the DLL; keep the upstream name radarsimcpp.dll
+# (no "lib" prefix) so the Python package loader finds it.
 set_target_properties(radarsimcpp PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS OFF
 )
+if(WIN32)
+    set_target_properties(radarsimcpp PROPERTIES PREFIX "")
+endif()
 
 # ------------------------------------------------------------------------------
 # Tests (ctest is driven by upstream build scripts when --test=on)

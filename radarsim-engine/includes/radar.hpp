@@ -37,13 +37,22 @@ public:
           rotation_array_(rotation_array),
           rotrate_(rotrate_array) {
         // Samples per pulse from the waveform extent and the sample rate.
-        // The Python layer snaps its own count to this value and raises if
-        // they disagree (simulator_radar.pyx:357-370).
+        // Samples per pulse: pulse_length * fs, truncated, with a snap to the
+        // nearest integer when within rounding noise of one. The product is
+        // formed from the float-narrowed fs, mirroring the Python snap rule
+        // (radar.py:432-448) — sim_radar rejects the radar if the two counts
+        // disagree.
         if (tx_ && rx_ && !tx_->freq_time_.empty()) {
-            const double pulse_length =
-                static_cast<double>(tx_->freq_time_.back());
-            sample_size_ = static_cast<int>(
-                std::llround(pulse_length * static_cast<double>(rx_->fs_)));
+            const double pulse_length = static_cast<double>(
+                tx_->freq_time_.back() - tx_->freq_time_.front());
+            const double raw = pulse_length * static_cast<double>(rx_->fs_);
+            const double nearest = std::round(raw);
+            if (std::fabs(raw - nearest) <=
+                1e-9 * std::max(1.0, std::fabs(raw))) {
+                sample_size_ = static_cast<int>(nearest);
+            } else {
+                sample_size_ = static_cast<int>(raw);
+            }
         }
     }
 
