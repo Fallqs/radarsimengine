@@ -240,7 +240,16 @@ private:
                 const double lam = kC / (fc + f_off);
                 const double k = 2.0 * kPi / lam;
                 const double k_over_2 = kPi / lam;
-                for (int s = s0; s < s0 + s_span; ++s) {
+                {
+                    // parallel over samples: each (p, s) writes a disjoint
+                    // flat index into the baseband buffers
+                    std::atomic<int> next_s{s0};
+                    auto s_worker = [&]() {
+                        for (;;) {
+                            const int s = next_s.fetch_add(1);
+                            if (s >= s0 + s_span) {
+                                break;
+                            }
                     const size_t flat =
                         (static_cast<size_t>(ch) * pulses + p) * samples + s;
                     const double u = gate + s / fs;
@@ -406,6 +415,9 @@ private:
                                 std::printf(" %d:%.3e", b, std::abs(coh[b]));
                         std::printf("\n");
                     }
+                        }
+                    };
+                    RunPool(s_worker, s_span);
                 }
             }
         }
@@ -643,6 +655,7 @@ private:
         const int max_b = ray_filter[1];
         bool escaped = false;
         int bounce = 0;
+        int seam_skips = 0;
         while (bounce < max_b) {
             typename rsim::Bvh<L>::Hit hit;
             if (!bvh.ClosestHit(org, dir, hit)) {
@@ -651,12 +664,18 @@ private:
             }
             // degenerate seam re-hit (the two triangles of a plate share an
             // edge; a just-reflected ray re-crossing it at ~zero distance is
-            // not a bounce): step past it without counting
+            // not a bounce): step past it without counting; capped so a ray
+            // wedged on a seam still terminates
             if (hit.t < L(1e-5)) {
                 org = org + dir * (hit.t + L(1e-6));
                 path += hit.t;
+                if (++seam_skips > 64) {
+                    escaped = true;
+                    break;
+                }
                 continue;
             }
+            seam_skips = 0;
             ++bounce;
             const rsim::SceneTri<L> &st = scene[hit.tri];
             org = org + dir * hit.t;
@@ -886,6 +905,27 @@ private:
         const double gt[3] = {g[0] - gn * n[0], g[1] - gn * n[1],
                               g[2] - gn * n[2]};
         return std::sqrt(gt[0] * gt[0] + gt[1] * gt[1] + gt[2] * gt[2]);
+    }
+
+    // Minimal std::thread pool over a work lambda (no OpenMP dependency).
+    template <typename F>
+    static void RunPool(F &&work, int work_items) {
+        const unsigned n_threads =
+            std::max(1u, std::thread::hardware_concurrency());
+        // spawning threads costs ~us each; below a few dozen items the
+        // serial path wins
+        if (n_threads <= 1 || work_items < 256) {
+            work();
+            return;
+        }
+        std::vector<std::thread> pool;
+        pool.reserve(n_threads);
+        for (unsigned t = 0; t < n_threads; ++t) {
+            pool.emplace_back(work);
+        }
+        for (auto &th : pool) {
+            th.join();
+        }
     }
 
     static double Sinc(double x) {  // sin(pi x)/(pi x)
