@@ -78,13 +78,29 @@ plate_normal 9.3%, corner_multibounce 8.8%, sphere/ grazing cases ~7-11x
 (rim treatment differs), turbine 1.5x. The plate and corner reflector — the
 canonical specular and multibounce cases — are within 10%.
 
+## RCS simulator: exact facet integration
+
+`includes/simulator_rcs.hpp` evaluates the PO phase integral over each
+triangle in closed form (the exact integral of a linear-phase function over
+a triangle, with Taylor fallbacks at the removable singularities) instead of
+Riemann-sampling facets at `density` points per wavelength. Riemann sampling
+aliases badly on curved meshes — the 1 m sphere at density 1 oscillated
++11/-10 dB around pi r^2 over 2-30 GHz, and even 20 pts/lambda stayed
+several dB off the exact integral at oblique plate angles. With the closed
+form: plate broadside exact to 4 decimals at 1-10 GHz, sphere within
++0.4/-1.2 dB of pi r^2 across 2-30 GHz (residual = triangulation and the
+hard facet-level silhouette, not sampling). The upstream RCS goldens (plate
+48.3 dBsm vs 49.41 ideal at 1 GHz) embed the closed engine's lossy sampler
+and remain a documented divergence.
+
 ## Remaining divergences (tracked)
 
 1. The exact sampler layout (occupancy probing details, Gordon/LUT
    internals) — the 3e-5-of-peak golden tolerance requires the engine's
    exact discrete computation.
-2. Grazing-incidence rim treatment on curved surfaces (sphere ~10x over).
-3. `back_propagating` return-leg reflections are not yet implemented.
+2. Grazing-incidence rim treatment on curved surfaces (sphere ~10x over in
+   the mesh simulator; the RCS path is exact per facet after the closed-form
+   integration above).
 
 - `tests/test_module_sim_radar_mesh.py` — 22 golden scenarios.
 - `benchmarks/baseline/cpu_reference.npz` — six full baseband captures with

@@ -3,15 +3,20 @@
 // Physical-Optics RCS simulator (radarsimc.pxd:397-409).
 //
 // Far-field PO sum over the lit, unoccluded surface:
-//   sigma = (k^2/pi) |sum_samples val * exp(j k (inc+obs) . r) dA|^2
-// with the vector-PO kernel val = conj(p_obs) . (J - (J.o) o),
-// J = n x (i x p_inc), i = propagation direction = -inc_dir.
-// Facets are sampled at `density` points per wavelength; occlusion against
-// the incident direction uses the scene BVH.
+//   sigma = (k^2/pi) |sum_facets val * integral_T exp(j q.r) dA|^2
+// with q = k (inc + obs) and the vector-PO kernel
+// val = conj(p_obs) . (J - (J.o) o), J = n x (i x p_inc),
+// i = propagation direction = -inc_dir.
+// The facet phase integral is evaluated in closed form (the exact integral
+// of a linear-phase function over a triangle), so the result does not alias
+// on curved meshes at any `density`; density is accepted for API
+// compatibility. Occlusion against the incident direction is tested per
+// facet against the scene BVH.
 //
-// Divergence notice: the upstream goldens embed the engine's exact sampling
-// grid; this implementation reproduces the PO model but not the exact
-// recorded values (docs/mesh_simulator_model.md).
+// Divergence notice: the upstream goldens embed the engine's discrete
+// sampler (the plate golden sits ~0.9 dB below the ideal PO value); this
+// implementation reproduces the PO model but not the exact recorded values
+// (docs/mesh_simulator_model.md).
 // ==============================================================================
 #pragma once
 
@@ -76,7 +81,7 @@ public:
 
         const double lam = 299792458.0 / static_cast<double>(frequency);
         const double k = 2.0 * 3.14159265358979323846 / lam;
-        const double ds = lam / static_cast<double>(density);
+        (void)density;  // exact facet integration: no sampling grid
 
         rcs_.assign(inc_dir_array.size(), T(0));
 
@@ -141,37 +146,26 @@ public:
                     continue;
                 }
 
-                // per-facet samples at density points per wavelength
-                const int n_s = std::max(
-                    1, static_cast<int>(std::ceil(std::sqrt(area) / ds)));
-                const int n_samples = (n_s + 1) * (n_s + 2) / 2;
-                const double da = area / n_samples;
-                for (int a = 0; a <= n_s; ++a) {
-                    for (int b = 0; b + a <= n_s; ++b) {
-                        const double u = (a + 1.0 / 3.0) / (n_s + 1.0);
-                        const double w = (b + 1.0 / 3.0) / (n_s + 1.0);
-                        const rsv::Vec3<L> pt = v0 + e1 * L(u) + e2 * L(w);
-                        // occlusion: visible from the source direction?
-                        // step off the lit face toward the source
-                        const rsv::Vec3<L> dir_i(L(-i[0]), L(-i[1]), L(-i[2]));
-                        const rsv::Vec3<L> src = pt + dir_i * L(1e-4);
-                        if (bvh.Occluded(src, dir_i, L(1e-6), L(1e9))) {
-                            continue;
-                        }
-                        const double phase =
-                            k * ((static_cast<double>(inc_dir_array[idx][0]) +
-                                  o[0]) *
-                                     pt[0] +
-                                 (static_cast<double>(inc_dir_array[idx][1]) +
-                                  o[1]) *
-                                     pt[1] +
-                                 (static_cast<double>(inc_dir_array[idx][2]) +
-                                  o[2]) *
-                                     pt[2]);
-                        sum += val *
-                               std::exp(std::complex<double>(0, phase)) * da;
-                    }
+                // closed-form facet integral of the linear-phase function:
+                //   integral_T exp(j q.r) dA = exp(j c) 2A J(a, b)
+                // with r = v0 + u e1 + w e2, c = q.v0, a = q.e1, b = q.e2
+                const double q[3] = {
+                    k * (static_cast<double>(inc_dir_array[idx][0]) + o[0]),
+                    k * (static_cast<double>(inc_dir_array[idx][1]) + o[1]),
+                    k * (static_cast<double>(inc_dir_array[idx][2]) + o[2])};
+                // occlusion: visible from the source direction? test the
+                // facet centroid, stepping off the lit face toward the source
+                const rsv::Vec3<L> ctr = v0 + (e1 + e2) * L(1.0 / 3.0);
+                const rsv::Vec3<L> dir_i(L(-i[0]), L(-i[1]), L(-i[2]));
+                const rsv::Vec3<L> src = ctr + dir_i * L(1e-4);
+                if (bvh.Occluded(src, dir_i, L(1e-6), L(1e9))) {
+                    continue;
                 }
+                const double a = q[0] * e1[0] + q[1] * e1[1] + q[2] * e1[2];
+                const double b = q[0] * e2[0] + q[1] * e2[1] + q[2] * e2[2];
+                const double c = q[0] * v0[0] + q[1] * v0[1] + q[2] * v0[2];
+                sum += val * TriPhaseInt(a, b) * (2.0 * area) *
+                       std::exp(std::complex<double>(0, c));
             }
             rcs_[idx] = static_cast<T>(k * k / 3.14159265358979323846 *
                                        std::norm(sum));
@@ -182,5 +176,34 @@ public:
     const std::vector<T> &GetRcs() { return rcs_; }
 
 private:
+    // S(x) = (e^{jx} - 1)/(jx), with its Taylor form near 0.
+    static std::complex<double> Si(double x) {
+        const std::complex<double> jx(0.0, x);
+        if (std::fabs(x) < 1e-3) {
+            // 1 + jx/2 + (jx)^2/6 + (jx)^3/24 + (jx)^4/120
+            return 1.0 + jx * (0.5 + jx * (1.0 / 6.0 +
+                                           jx * (1.0 / 24.0 +
+                                                 jx * (1.0 / 120.0))));
+        }
+        return (std::exp(jx) - 1.0) / jx;
+    }
+
+    // J(a,b) = integral over the unit simplex {u>=0, w>=0, u+w<=1} of
+    // exp(j (a u + b w)) dw du  (J(0,0) = 1/2).
+    static std::complex<double> TriPhaseInt(double a, double b) {
+        const std::complex<double> ja(0.0, a), jb(0.0, b);
+        if (std::fabs(a) < 1e-3 && std::fabs(b) < 1e-3) {
+            // J = sum (ja)^n (jb)^m n! m! / (n+m+2)!
+            return 0.5 + (ja + jb) / 6.0 -
+                   (ja * ja + ja * jb + jb * jb) / 12.0;
+        }
+        if (std::fabs(b) < 1e-3) {
+            // b -> 0 limit: (e^{ja} - 1 - ja)/(ja)^2
+            return (std::exp(ja) - 1.0 - ja) / (ja * ja);
+        }
+        // general: J = [e^{jb} S(a-b) - S(a)] / (jb)
+        return (std::exp(jb) * Si(a - b) - Si(a)) / jb;
+    }
+
     std::vector<T> rcs_;
 };
