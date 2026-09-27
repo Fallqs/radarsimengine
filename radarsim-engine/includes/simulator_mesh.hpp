@@ -24,8 +24,10 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/enums.hpp"
@@ -518,7 +520,12 @@ private:
             }
         }
 
-        // fine rays per occupied cell
+        // fine rays per occupied cell, parallel over cells
+        struct CellJob {
+            double phi_c, theta_c, fine_step;
+            int count;
+        };
+        std::vector<CellJob> jobs;
         for (int ip = 0; ip < n_phi; ++ip) {
             for (int it = 0; it < n_theta; ++it) {
                 if (!dilated[ip * n_theta + it]) {
@@ -526,7 +533,6 @@ private:
                 }
                 const double phi_c = (-90.0 + ip * grid_deg) * kPi / 180.0;
                 const double theta_c = (0.0 + it * grid_deg) * kPi / 180.0;
-                // probe range for the sizing formula
                 const rsv::Vec3<L> pdir(
                     static_cast<L>(std::sin(theta_c) * std::cos(phi_c)),
                     static_cast<L>(std::sin(theta_c) * std::sin(phi_c)),
@@ -536,23 +542,66 @@ private:
                 if (bvh.ClosestHit(org, pdir, probe)) {
                     R_cell = static_cast<double>(probe.t);
                 } else {
-                    // dilated cell: use the scene's mean range
                     R_cell = SceneMeanRange(scene, org);
                 }
-                const double fine_step =
-                    std::atan(lam_min / density / R_cell);
-                const int count = static_cast<int>(grid / fine_step) + 1;
-                const double phi_start = phi_c - 0.5 * grid;
-                const double theta_start = theta_c - 0.5 * grid;
-                for (int i = 0; i < count; ++i) {
-                    for (int j = 0; j < count; ++j) {
-                        TraceRay(scene, bvh, org, phi_start + i * fine_step,
-                                 theta_start + j * fine_step, fine_step,
-                                 ray_filter, po_samples, tx_ch.polar,
-                                 back_propagating);
+                CellJob job;
+                job.phi_c = phi_c;
+                job.theta_c = theta_c;
+                job.fine_step = std::atan(lam_min / density / R_cell);
+                job.count = static_cast<int>(grid / job.fine_step) + 1;
+                jobs.push_back(job);
+            }
+        }
+
+        const unsigned n_threads =
+            std::max(1u, std::thread::hardware_concurrency());
+        // per-job outputs merged in job order: deterministic regardless of
+        // scheduling (test_back_propagation_changes_nothing_without_multipath
+        // asserts bit-exact on/off equality)
+        std::vector<std::vector<PoSample>> per_job_po(jobs.size());
+        std::vector<std::vector<BackPropSample>> per_job_bp(jobs.size());
+        std::atomic<size_t> next_job{0};
+        auto worker = [&]() {
+            for (;;) {
+                const size_t job_idx = next_job.fetch_add(1);
+                if (job_idx >= jobs.size()) {
+                    break;
+                }
+                const CellJob &job = jobs[job_idx];
+                auto &local_po = per_job_po[job_idx];
+                auto &local_bp = per_job_bp[job_idx];
+                const double phi_start = job.phi_c - 0.5 * grid;
+                const double theta_start = job.theta_c - 0.5 * grid;
+                for (int i = 0; i < job.count; ++i) {
+                    for (int j = 0; j < job.count; ++j) {
+                        TraceRay(scene, bvh, org, phi_start + i * job.fine_step,
+                                 theta_start + j * job.fine_step,
+                                 job.fine_step, ray_filter, local_po, local_bp,
+                                 tx_ch.polar, back_propagating);
                     }
                 }
             }
+        };
+        if (jobs.empty()) {
+            return;
+        }
+        if (n_threads <= 1) {
+            worker();
+        } else {
+            std::vector<std::thread> pool;
+            pool.reserve(n_threads);
+            for (unsigned t = 0; t < n_threads; ++t) {
+                pool.emplace_back(worker);
+            }
+            for (auto &th : pool) {
+                th.join();
+            }
+        }
+        for (auto &v : per_job_po) {
+            po_samples.insert(po_samples.end(), v.begin(), v.end());
+        }
+        for (auto &v : per_job_bp) {
+            bp_samples_.insert(bp_samples_.end(), v.begin(), v.end());
         }
     }
 
@@ -576,6 +625,7 @@ private:
                   double phi, double theta, double fine_step,
                   rsv::Vec2<int_t> ray_filter,
                   std::vector<PoSample> &po_samples,
+                  std::vector<BackPropSample> &bp_out,
                   const rsv::Vec3<std::complex<L>> &tx_pol,
                   bool back_propagating) {
         std::vector<HitRec> chain;
@@ -671,7 +721,8 @@ private:
         }
 
         if (back_propagating && escaped) {
-            BuildBackPropChain(scene, bvh, chain, fine_step, ray_filter);
+            BuildBackPropChain(scene, bvh, chain, fine_step, ray_filter,
+                               bp_out);
         }
     }
 
@@ -683,7 +734,8 @@ private:
     void BuildBackPropChain(const std::vector<rsim::SceneTri<L>> &scene,
                             const rsim::Bvh<L> &bvh,
                             const std::vector<HitRec> &chain, double fine_step,
-                            rsv::Vec2<int_t> ray_filter) {
+                            rsv::Vec2<int_t> ray_filter,
+                            std::vector<BackPropSample> &bp_out) {
         for (size_t i = 1; i < chain.size(); ++i) {
             const HitRec &hi = chain[i];
             if (scene[hi.tri].skip_diffusion) {
@@ -759,7 +811,7 @@ private:
             bp.py = chain[0].point[1];
             bp.pz = chain[0].point[2];
             bp.refl_total = hi.refl * refl_ret;
-            bp_samples_.push_back(bp);
+            bp_out.push_back(bp);
         }
     }
 
