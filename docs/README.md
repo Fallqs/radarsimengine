@@ -29,22 +29,26 @@ Every requirement and design decision in these documents cites its source in the
 RadarSimPy repository (file path and line where applicable). If the upstream
 repository changes, these documents should be re-checked against it.
 
-## Status (2026-09-28)
+## Status (2026-09-28, end of session)
 
-**Phases 0–4 implemented (point/noise/interference/phase-noise/geometry/LiDAR/
-mesh-SBR/RCS); GPU (Phase 6) not started.** The engine builds with CMake and
-passes its CTest suites; via `radarsim-engine/tools/build_and_integrate.sh` it
-drops into the upstream package and runs the unmodified upstream pytest suite.
+**Phases 0–5 implemented and committed; Phase 6 (CUDA) blocked on hardware.**
+The engine builds with CMake (MSVC/GCC/Clang or the bundled conda-zig path),
+passes its own CTest suites (4/4), and runs the unmodified upstream pytest
+suite via `radarsim-engine/tools/build_and_integrate.sh`.
 
-Conformance against the full upstream suite: **425 passed / 38 failed /
-45 skipped** (45 skips = glTF animation, pygltflib not installed here).
-All point-target, noise, pulsed, range-gate, and LiDAR suites pass fully.
-The mesh/RCS goldens fail on tolerance: they encode the engine's exact ray
-sampler, which is not externally documented at the precision needed — the
-implementation is physically validated instead (plate 9%, corner reflector 9%
-of benchmark captures; RCS within 0.01 dB of the analytic PO plate value).
-See `radarsim-engine/docs/mesh_simulator_model.md`.
+Upstream conformance: **427 passed / 36 failed / 45 skipped** (~54 s).
+Every point-target, noise, pulsed, range-gate, LiDAR, back-propagation, and
+config suite passes fully. The mesh/RCS golden tests fail on tolerance: they
+encode the closed engine's exact ray sampler, which is not externally
+recoverable at the required precision (3e-5 of peak). The mesh/RCS
+implementation is validated physically instead -- plate 9% and corner
+reflector 9% of the benchmark reference captures, RCS within 0.01 dB of the
+analytic PO plate value -- and the engine carries its own self-regression
+suite (`radarsim-engine/tests/test_mesh_regression.cpp`).
 
-Open items: multi-segment waveform phase quirk; phase-noise golden sequence;
-mesh/RCS exact-sampler conformance; grazing-rim treatment on curved surfaces;
-`back_propagating` return legs; CUDA backend.
+Blocked items:
+- Phase 6 (CUDA kernels): no GPU/toolkit on this machine.
+- Mesh/RCS golden exactness, multi-segment waveform phase quirk, phase-noise
+  golden sequence: all encode closed-engine internals (see
+  `radarsim-engine/docs/mesh_simulator_model.md` and
+  `radarsim-engine/docs/point_simulator_model.md`).
